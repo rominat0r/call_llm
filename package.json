@@ -14,6 +14,7 @@
     "@deepgram/sdk": "^3.6.0",
     "@google-cloud/speech": "^6.7.0",
     "@google-cloud/text-to-speech": "^5.4.0",
+    "assemblyai": "^4.7.0",
     "axios": "^1.6.8",
     "colors": "^1.4.0",
     "elevenlabs-alpha": "^0.0.5",

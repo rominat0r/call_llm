@@ -8,10 +8,12 @@ import { TextToSpeech } from './text-to-speech';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { isPromise } from 'util/types';
-import { RealtimeTranscriber, AssemblyAI, RealtimeTranscript  } from 'assemblyai';
+const { createClient, LiveTranscriptionEvents } = require("@deepgram/sdk");
 
 const app = ExpressWs(express()).app;
 const PORT: number = parseInt(process.env.PORT || '8080');
+
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 export const startApp = () => {
   
@@ -41,40 +43,74 @@ export const startApp = () => {
     let callSid: string;
     let marks: string[] = [];
 
-    const client = new AssemblyAI({
-      apiKey: `${process.env.ASSEMBLYAI_API_KEY}`,
-    })
-    const transcriber =  client.realtime.transcriber({
+    const connection = deepgram.listen.live({
+      smart_format: true,
+      model: 'nova-2-phonecall',
+      language: 'en-US',
+      encoding: 'mulaw',
+      sample_rate: 8000,
+      diarize: true,
+      punctuate: true,
+      channels:1,
+      interim_results: true,
+      endpointing: 100,
       
-      // Twilio media stream sends audio in mulaw format
-      encoding: 'pcm_mulaw',
-      // Twilio media stream sends audio at 8000 sample rate
-      sampleRate: 8000
-    })
-    const transcriberConnectionPromise = transcriber.connect();
-  
-    transcriber.on('transcript.partial', (partialTranscript) => {
-      // Don't print anything when there's silence
-      if (!partialTranscript.text) return;
-      console.clear();
-      console.log(partialTranscript.text);
     });
-    transcriber.on('transcript.final', (finalTranscript) => {
-      
-      llm.completion(finalTranscript.text);  
+
+    let finalResult = '';
+    let speechFinal = false;
+
+    connection.on(LiveTranscriptionEvents.Open, () => {
+      // Listen for any transcripts received from Deepgram and write them to the console.
+      connection.on(LiveTranscriptionEvents.Transcript, (data:any) => {
+       // console.dir(data, { depth: null });
+
+        const speakers = data.channel.alternatives[0].words?.map((word: { speaker: number }) => word.speaker);
+        const alternatives = data.channel?.alternatives;
+        let text = '';
+        if (alternatives) {
+          text = alternatives[0]?.transcript;
+        }
+        // if (marks.length > 0 && isSpeaking && speakers.includes(1) )
+        //   {
+        //    console.log('Utterance detected (isFinal + silence)'.magenta);
+        //    // ... perform actions like clearing the stream ...
+        //    ws.send(
+        //      JSON.stringify({
+        //        streamSid,
+        //        event: 'clear',
+        //      }),
+        //    );
+        //  }
+        //if speaker is user then send to llm 
+        if (speakers.includes(0)) return;
+        
+        // if (data.is_final && data.speech_final) {
+        //   const transcript = data.channel.alternatives[0].transcript;
+        //   console.log(`User: ${transcript}`.yellow);
+        //   llm.completion(transcript);      
+        // } 
+        if (data.is_final === true && text.trim().length > 0) {
+          finalResult += ` ${text}`;
+          // if speech_final and is_final that means this text is accurate and it's a natural pause in the speakers speech. We need to send this to the assistant for processing
+          if (data.speech_final === true) {
+            speechFinal = true; // this will prevent a utterance end which shows up after speechFinal from sending another response
+            console.log(`User: ${finalResult}`.yellow);
+            llm.completion(finalResult);  
+            finalResult = '';
+          } else {
+            // if we receive a message without speechFinal reset speechFinal to false, this will allow any subsequent utteranceEnd messages to properly indicate the end of a message
+            speechFinal = false;
+          }
+        }   
+      });
+
+      // Listen for the connection to close.
+      connection.on(LiveTranscriptionEvents.Close, () => {
+        console.log("Connection closed.");
+      });
+
     });
-    transcriber.on('transcript', (transcript: RealtimeTranscript) => {
-      if (!transcript.text) {
-        return
-      }
-  
-      if (transcript.message_type === 'PartialTranscript') {
-        console.log('Partial:', transcript.text)
-      } else {
-        console.log('Final:', transcript.text)
-      }
-    })
-    
     
     // Incoming from MediaStream
     ws.on('message', async (data: string) => {
@@ -111,9 +147,8 @@ export const startApp = () => {
 
       } else if (message.event === 'media' && message.media) {
         
-        await transcriberConnectionPromise;
-        transcriber.sendAudio(Buffer.from(message.media.payload, 'base64'));
-        
+        const audioBuffer = Buffer.from(message.media.payload, 'base64');
+        connection.send(audioBuffer);
 
       } else if (message.event === 'mark' && message.mark) {
         const label: string = message.mark.name;
