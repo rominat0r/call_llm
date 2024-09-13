@@ -5,7 +5,7 @@ import VoiceResponse from 'twilio/lib/twiml/VoiceResponse';
 import { Llm } from './llm';
 import { Stream } from './stream';
 import { TextToSpeech } from './text-to-speech';
-import { ElevenLabsAlpha } from 'elevenlabs-alpha';
+import { ElevenLabsAlpha } from 'elevenlabs-alpha'
 const speech = require('@google-cloud/speech').v1p1beta1;
 
 const app = ExpressWs(express()).app;
@@ -22,13 +22,13 @@ export const startApp = () => {
     twiml.connect().stream({
       url: `wss://${process.env.SERVER_DOMAIN}/call/connection`,
     });
-
+    
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twiml.toString());
   });
 
   app.ws('/call/connection', (ws: WebSocket) => {
-    
+    let isAssistantSpeaking = false;
    
     console.log('Twilio -> Connection opened'.underline.green);
 
@@ -41,13 +41,14 @@ export const startApp = () => {
     let streamSid: string;
     let callSid: string;
     let marks: string[] = [];
-   
+    
     const recognizeStream = client
     .streamingRecognize({
       config: {
         encoding: 'MULAW', 
         sampleRateHertz: 8000, 
         languageCode: 'en-US', 
+        useEnhanced: true,
         enableSpeakerDiarization: true,
         minSpeakerCount: 1,
         maxSpeakerCount: 2,
@@ -57,30 +58,42 @@ export const startApp = () => {
     })
     .on('error', console.error)
     .on('data', (data:any) => {
-      console.log(data.results[0].alternatives[0].words);
-
-
+      //console.log(data.results[0].alternatives[0].words);
+      if (isAssistantSpeaking)return
+    
       if (data.results[0] && data.results[0].isFinal) {
 
         const transcription = data.results[0].alternatives[0].transcript;
+        
+        const speakers = data.results[0].alternatives[0].words.map((word: { speakerTag: number }) => word.speakerTag);
+        
+        if (isAssistantSpeaking){ 
+          if ( speakers.includes(2) )
+                {
+                 console.log('Utterance detected (isFinal + silence)'.magenta);
+                
+                 // ... perform actions like clearing the stream ...
+                 ws.send(
+                   JSON.stringify({
+                     streamSid,
+                     event: 'clear',
+                   }),
+                 );
+               }
+               else{
+                return;
+               }
+        }
         if (transcription && marks.length === 0) {
-          
+          const wordsInfo = data.results[0].alternatives[0].words;
+          wordsInfo.map((a:any) =>
+            console.log(` word: ${a.word}, speakerTag: ${a.speakerTag}`)
+          );
           console.log(`Transcription – STT -> LLM: ${transcription}`.yellow);
+
           llm.completion(transcription);
 
-          // Check for silence after final result
-          const currentTime = Date.now();
-          if (marks.length > 0 && data?.length > 15) {
-            console.log('Utterance detected (isFinal + silence)'.magenta);
-            // ... perform actions like clearing the stream ...
-            ws.send(
-              JSON.stringify({
-                
-                streamSid,
-                event: 'clear',
-              }),
-            );
-          }
+     
         }
       }
 
@@ -88,13 +101,7 @@ export const startApp = () => {
     
     // Incoming from MediaStream
     ws.on('message', (data: string) => {
-      const message: {
-        event: string;
-        start?: { streamSid: string; callSid: string };
-        media?: { payload: string };
-        mark?: { name: string };
-        sequenceNumber?: number;
-      } = JSON.parse(data);
+      const message = JSON.parse(data);
 
       if (message.event === 'start' && message.start) {
         streamSid = message.start.streamSid;
@@ -112,27 +119,13 @@ export const startApp = () => {
 
         // Estimate the duration of the greeting and unmute after it's likely finished
         
-      } else if (message.event === 'media' && message.media) {
-      
-        
-        if (marks.length === 0) {
-          
-          try {
-              // Check if the stream is writable before writing
-              if (recognizeStream.writable) {
-                  recognizeStream.write(message.media.payload);
-              } else {
-                  console.error('Cannot write to stream: stream is not writable');
-                  // Handle the situation where the stream is not writable 
-                  // (e.g., create a new stream, inform the user, etc.)
-              }
-          } catch (error) {
-              console.error('Error writing to recognizeStream:', error);
-              // Handle the error appropriately 
-              // (e.g., re-establish the connection, inform the user, etc.)
-          }
-      }
-
+      } else if (message.event === 'media' && message.media?.payload) {
+        const audioBuffer = Buffer.from(message.media.payload, 'base64');
+        if (recognizeStream.writable) {
+          recognizeStream.write(audioBuffer);
+        } else {
+          console.error('Recognize stream is not writable');
+        }
       } else if (message.event === 'mark' && message.mark) {
         const label: string = message.mark.name;
 
@@ -155,16 +148,17 @@ export const startApp = () => {
     textToSpeech.on(
       'speech',
       (responseIndex: number, audio: string, label: string) => {
+        isAssistantSpeaking = true;
+        console.log('speaking');
         console.log(`TTS -> TWILIO: ${label}`.blue);
-  
-        
         stream.buffer(responseIndex, audio);
-  
-        // Estimate the duration of the speech and reset the flag after it's likely finished
-        // const estimatedDurationMs = audio.length / 16000; 
-        // setTimeout(() => {
-        //   isSpeaking = false;
-        // }, estimatedDurationMs);
+
+        const estimatedDurationMs = audio.length / 5.5;
+        console.log(`Estimated duration: ${estimatedDurationMs}ms`);
+        setTimeout( () => {
+          isAssistantSpeaking = false;
+          console.log('end of speech');
+        }, estimatedDurationMs);
       },
     );
 

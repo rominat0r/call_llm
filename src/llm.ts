@@ -16,7 +16,7 @@ export class Llm extends EventEmitter {
       {
         role: 'system',
         content:
-          'You are a helpful assistant called Emma. You help get information about companies. If user asks about information on the company as what specific info is needed, dont provide full info. Keep your responses short and to the point. This is a conversation you are having with a person, so keep it natural and casual. If you think user hasnt finished his thought, leave your response empty or say hm or aha',
+          'You are a helpful assistant called Emma. You help get information about companies.If user asks about information on the company as what specific info is needed, dont provide full info. Keep your responses short and to the point. This is a conversation you are having with a person, so keep it natural and casual. If you think user hasnt finished his thought, leave your response empty or say hm or aha. Part of your response could end up as an input of the user, if you notice that just ignore. ',
       },
       {
         role: 'assistant',
@@ -81,7 +81,7 @@ export class Llm extends EventEmitter {
 
       const content = chunk.choices[0]?.delta?.content || '';
       finishReason = chunk.choices[0]?.finish_reason ?? '';
-      console.dir(chunk.choices[0]?.delta.tool_calls);
+      
       // We use completeResponse for userContext
       completeResponse += content;
       partialResponse += content;

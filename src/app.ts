@@ -5,13 +5,14 @@ import VoiceResponse from 'twilio/lib/twiml/VoiceResponse';
 import { Llm } from './llm';
 import { Stream } from './stream';
 import { TextToSpeech } from './text-to-speech';
-import * as path from 'path';
-import * as fs from 'fs/promises';
-import { isPromise } from 'util/types';
-import { RealtimeTranscriber, AssemblyAI, RealtimeTranscript  } from 'assemblyai';
+import { ElevenLabsAlpha } from 'elevenlabs-alpha'
+const speech = require('@google-cloud/speech').v1p1beta1;
 
 const app = ExpressWs(express()).app;
 const PORT: number = parseInt(process.env.PORT || '8080');
+
+const elevenlabs = new ElevenLabsAlpha();
+const client = new speech.SpeechClient();
 
 export const startApp = () => {
   
@@ -21,14 +22,14 @@ export const startApp = () => {
     twiml.connect().stream({
       url: `wss://${process.env.SERVER_DOMAIN}/call/connection`,
     });
-
+    
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twiml.toString());
   });
 
   app.ws('/call/connection', (ws: WebSocket) => {
-    let isInitialGreetingPlaying = false;
-    let isSpeaking = false; 
+    let isAssistantSpeaking = false;
+   
     console.log('Twilio -> Connection opened'.underline.green);
 
     ws.on('error', console.error);
@@ -40,51 +41,67 @@ export const startApp = () => {
     let streamSid: string;
     let callSid: string;
     let marks: string[] = [];
-
-    const client = new AssemblyAI({
-      apiKey: `${process.env.ASSEMBLYAI_API_KEY}`,
-    })
-    const transcriber =  client.realtime.transcriber({
-      
-      // Twilio media stream sends audio in mulaw format
-      encoding: 'pcm_mulaw',
-      // Twilio media stream sends audio at 8000 sample rate
-      sampleRate: 8000
-    })
-    const transcriberConnectionPromise = transcriber.connect();
-  
-    transcriber.on('transcript.partial', (partialTranscript) => {
-      // Don't print anything when there's silence
-      if (!partialTranscript.text) return;
-      console.clear();
-      console.log(partialTranscript.text);
-    });
-    transcriber.on('transcript.final', (finalTranscript) => {
-      
-      llm.completion(finalTranscript.text);  
-    });
-    transcriber.on('transcript', (transcript: RealtimeTranscript) => {
-      if (!transcript.text) {
-        return
-      }
-  
-      if (transcript.message_type === 'PartialTranscript') {
-        console.log('Partial:', transcript.text)
-      } else {
-        console.log('Final:', transcript.text)
-      }
-    })
     
+    const recognizeStream = client
+    .streamingRecognize({
+      config: {
+        encoding: 'MULAW', 
+        sampleRateHertz: 8000, 
+        languageCode: 'en-US', 
+        useEnhanced: true,
+        enableSpeakerDiarization: true,
+        minSpeakerCount: 1,
+        maxSpeakerCount: 2,
+        model: 'phone_call',
+      },
+      interimResults: true,
+    })
+    .on('error', console.error)
+    .on('data', (data:any) => {
+      //console.log(data.results[0].alternatives[0].words);
+      if (isAssistantSpeaking)return
+    
+      if (data.results[0] && data.results[0].isFinal) {
+
+        const transcription = data.results[0].alternatives[0].transcript;
+        
+        const speakers = data.results[0].alternatives[0].words.map((word: { speakerTag: number }) => word.speakerTag);
+        
+        if (isAssistantSpeaking){ 
+          if ( speakers.includes(2) )
+                {
+                 console.log('Utterance detected (isFinal + silence)'.magenta);
+                
+                 // ... perform actions like clearing the stream ...
+                 ws.send(
+                   JSON.stringify({
+                     streamSid,
+                     event: 'clear',
+                   }),
+                 );
+               }
+               else{
+                return;
+               }
+        }
+        if (transcription && marks.length === 0) {
+          const wordsInfo = data.results[0].alternatives[0].words;
+          wordsInfo.map((a:any) =>
+            console.log(` word: ${a.word}, speakerTag: ${a.speakerTag}`)
+          );
+          console.log(`Transcription – STT -> LLM: ${transcription}`.yellow);
+
+          llm.completion(transcription);
+
+     
+        }
+      }
+
+    });
     
     // Incoming from MediaStream
-    ws.on('message', async (data: string) => {
-      const message: {
-        event: string;
-        start?: { streamSid: string; callSid: string };
-        media?: { payload: string };
-        mark?: { name: string };
-        sequenceNumber?: number;
-      } = JSON.parse(data);
+    ws.on('message', (data: string) => {
+      const message = JSON.parse(data);
 
       if (message.event === 'start' && message.start) {
         streamSid = message.start.streamSid;
@@ -94,27 +111,21 @@ export const startApp = () => {
         console.log(
           `Twilio -> Starting Media Stream for ${streamSid}`.underline.red,
         );
-        
+       
         textToSpeech.generate({
           partialResponseIndex: null,
           partialResponse: 'Hi, my name is Emma. How can I help you?',
         });
 
-        // const filePath = path.join(__dirname, 'test.m4a');
-
-        // try {
-        //   const audioBuffer = await fs.readFile(filePath);
-        //   connection.send(audioBuffer);
-        // } catch (err) {
-        //   console.error('Error reading audio file:', err);
-        // }
-
-      } else if (message.event === 'media' && message.media) {
+        // Estimate the duration of the greeting and unmute after it's likely finished
         
-        await transcriberConnectionPromise;
-        transcriber.sendAudio(Buffer.from(message.media.payload, 'base64'));
-        
-
+      } else if (message.event === 'media' && message.media?.payload) {
+        const audioBuffer = Buffer.from(message.media.payload, 'base64');
+        if (recognizeStream.writable) {
+          recognizeStream.write(audioBuffer);
+        } else {
+          console.error('Recognize stream is not writable');
+        }
       } else if (message.event === 'mark' && message.mark) {
         const label: string = message.mark.name;
 
@@ -122,7 +133,7 @@ export const startApp = () => {
           `Twilio -> Audio completed mark (${message.sequenceNumber}): ${label}`
             .red,
         );
-        isSpeaking = false;
+
         marks = marks.filter((m: string) => m !== message.mark?.name);
       } else if (message.event === 'stop') {
         console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
@@ -137,11 +148,17 @@ export const startApp = () => {
     textToSpeech.on(
       'speech',
       (responseIndex: number, audio: string, label: string) => {
-
-        isSpeaking = true;
+        isAssistantSpeaking = true;
+        console.log('speaking');
         console.log(`TTS -> TWILIO: ${label}`.blue);
         stream.buffer(responseIndex, audio);
-       
+
+        const estimatedDurationMs = audio.length / 5.5;
+        console.log(`Estimated duration: ${estimatedDurationMs}ms`);
+        setTimeout( () => {
+          isAssistantSpeaking = false;
+          console.log('end of speech');
+        }, estimatedDurationMs);
       },
     );
 

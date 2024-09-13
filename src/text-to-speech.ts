@@ -1,17 +1,11 @@
 import EventEmitter from 'events';
 import { Buffer } from 'node:buffer';
-
-const textToSpeech = require('@google-cloud/text-to-speech');
-
-const client = new textToSpeech.TextToSpeechClient({
-  projectId: 'webapp-389506', // Replace with your Google Cloud project ID
-  clientConfig: {
-    region: 'europe-central2-b', // Replace with the region you want to use
-  },
-});
+import axios from 'axios';
 
 export class TextToSpeech extends EventEmitter {
-
+  voiceId = '21m00Tcm4TlvDq8ikWAM';
+  outputFormat = 'ulaw_8000';
+  nextExpectedIndex = 0;
   speechBuffer: Record<number, string> = {};
 
   constructor() {
@@ -29,38 +23,32 @@ export class TextToSpeech extends EventEmitter {
     }
 
     try {
-      const request = {
-        input: { text: partialResponse },
-        voice: { languageCode: 'en-US',  name: 'en-US-Studio-O' },
-        audioConfig: {
-          audioEncoding: 'MULAW', // Or another format
-          sampleRateHertz: 8000,  // Set the correct sample rate (e.g., 8000 Hz for telephony)
-          pitch: 0,
-          speakingRate: 1,
-          effectsProfileId: ["telephony-class-application"],
+      const response = await axios.post(
+        `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream?output_format=${this.outputFormat}&optimize_streaming_latency=3`,
+        {
+          model_id: 'eleven_turbo_v2',
+          text: partialResponse,
         },
-      };
+        {
+          responseType: 'arraybuffer', // To handle binary data, such as audio
+          headers: {
+            'xi-api-key': process.env['ELEVENLABS_API_KEY'],
+            accept: 'audio/wav',
+          },
+        },
+      );
 
-      // Performs the text-to-speech request
-      const [response] = await client.synthesizeSpeech(request);
-
-      const audioArrayBuffer = response.audioContent;
-
-      if (!audioArrayBuffer) {
-        throw new Error('No audio content returned from Text-to-Speech service');
-      }
-
-      const audioBase64 = Buffer.from(audioArrayBuffer).toString('base64');
+      const audioArrayBuffer = response.data;
 
       this.emit(
         'speech',
         partialResponseIndex,
-        audioBase64,
+        Buffer.from(audioArrayBuffer).toString('base64'),
         partialResponse,
       );
     } catch (err) {
-      console.error(err,'Error occurred in TextToSpeech service:');
-      
+      console.error('Error occurred in TextToSpeech service');
+      console.error(err);
     }
   }
 }
